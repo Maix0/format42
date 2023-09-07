@@ -6,7 +6,6 @@ use std::cell::RefCell;
 
 thread_local! {
     pub static CURRENT_DATA_BYTES: RefCell<Box<[u8]>> = RefCell::new(Vec::new().into_boxed_slice());
-    pub static CURRENT_OUTPUT: RefCell<Vec<u8>> = const {RefCell::new(Vec::new())};
 }
 use tree_sitter::{Node, TextProvider, Tree};
 
@@ -21,25 +20,41 @@ fn main() {
         return;
     }
     args.iter()
-        .map(|o| std::fs::OpenOptions::new().read(true).write(true).open(o))
-        .map(|res| res.map(|f| f.metadata().map(|m| (f, m))))
+        .map(|o| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(o)
+                .map(|v| (o, v))
+        })
+        .map(|res| res.map(|(p, f)| f.metadata().map(|m| (p, f, m))))
         .map(|res| match res {
             Err(e) | Ok(Err(e)) => Err(e),
             Ok(Ok(v)) => Ok(v),
         })
         .map(|res| {
-            res.map(|(file, metadata)| (file, Vec::<u8>::with_capacity(metadata.len() as usize)))
+            res.map(|(path, file, metadata)| {
+                (
+                    path,
+                    file,
+                    Vec::<u8>::with_capacity(metadata.len() as usize),
+                )
+            })
         })
         .map(|res| -> Result<_, std::io::Error> {
-            let (mut f, o) = res?;
+            let (path, mut f, o) = res?;
             let mut buffer = Vec::with_capacity(o.len());
             f.read_to_end(&mut buffer)?;
-            Ok((f, buffer, o))
+            Ok((path, f, buffer, o))
         }) // .into_par_iter()
-        .map(|res| res.map(|(f, i, o)| (f, run(i.into_boxed_slice(), o))))
+        .map(|res| res.map(|(p, f, i, o)| (p, f, run(i.into_boxed_slice(), o))))
         .for_each(|res| match res {
-            Ok((f, o)) => {
-                println!("{:?}: \n{:}", f, std::str::from_utf8(&o).unwrap());
+            Ok((path, _f, o)) => {
+                println!(
+                    "{}: \n{:}",
+                    std::path::PathBuf::from(path).display(),
+                    std::str::from_utf8(&o).unwrap()
+                );
             }
             Err(e) => {
                 println!("Error: {e}");
@@ -47,7 +62,7 @@ fn main() {
         });
 }
 
-fn run(data: Box<[u8]>, output: Vec<u8>) -> Vec<u8> {
+fn run(data: Box<[u8]>, mut output: Vec<u8>) -> Vec<u8> {
     let mut ts = tree_sitter::Parser::new();
     ts.set_language(tree_sitter_c::language()).unwrap();
     if std::str::from_utf8(&data).is_err() {
@@ -57,7 +72,10 @@ fn run(data: Box<[u8]>, output: Vec<u8>) -> Vec<u8> {
     let tree = ts.parse(get_data(&()), None).unwrap();
     let top_level = ToplevelDefinition::from_tree(&tree);
 
-    dbg!(&top_level);
+    top_level
+        .iter()
+        .map(|t| t.format(0, &mut output))
+        .for_each(|r| r.unwrap());
     output
 }
 
@@ -113,18 +131,193 @@ fn get_data(_: &()) -> &'_ [u8] {
     unsafe { &*CURRENT_DATA_BYTES.with_borrow(|r| &**r as *const [u8]) }
 }
 
+impl<'ts> FnDefinitionBlock<'ts> {
+    pub fn format(&self, ident_value: usize, fmt: &mut impl std::io::Write) -> std::io::Result<()> {
+        for def in &self.0 {
+            //dbg!(def.1.utf8_text(get_data(&())).unwrap());
+        }
+        Ok(())
+    }
+}
+
+fn tabbed_len(s: &str) -> usize {
+    let mut len = 0;
+    for chr in s.chars() {
+        len += 1;
+        if chr == '\t' {
+            len += 4 - len % 4;
+        }
+    }
+    len
+}
+
+impl<'ts> DeclarationBlock<'ts> {
+    pub fn format(&self, ident: usize, fmt: &mut impl std::io::Write) -> std::io::Result<()> {
+        if !self.0.is_empty() {
+            let mut cursor = (self.0)[0].1.walk();
+            let mut func_defs = self
+                .0
+                .iter()
+                .map(|def| {
+                    let mut childs = def.1.children(&mut cursor);
+                    let mut ty = childs
+                        .next()
+                        .unwrap()
+                        .utf8_text(get_data(&()))
+                        .unwrap()
+                        .trim()
+                        .to_string();
+                    let func = childs.next().unwrap();
+                    ty.push('\t');
+                    (ty, func)
+                })
+                .collect::<Vec<_>>();
+            let mut aligned = false;
+            let mut current_max = 0;
+            while !aligned {
+                aligned = true;
+                for (ty, _) in &mut func_defs {
+                    let mut cur = tabbed_len(ty);
+                    match current_max.cmp(&cur) {
+                        std::cmp::Ordering::Greater => {
+                            aligned = false;
+                            while cur < current_max {
+                                ty.push('\t');
+                                cur = tabbed_len(ty);
+                            }
+                        }
+                        std::cmp::Ordering::Less => {
+                            current_max = cur;
+                            aligned = false;
+                        }
+                        std::cmp::Ordering::Equal => {
+                            aligned &= true;
+                        }
+                    }
+                }
+            }
+            for (ty, def) in func_defs {
+                for _ in 0..ident {
+                    write!(fmt, "\t")?;
+                }
+                writeln!(fmt, "{ty} {};", def.utf8_text(get_data(&())).unwrap())?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<'ts> CommentBlock<'ts> {
-    pub fn print(&self, ident_value: usize, fmt: &mut impl std::fmt::Write) -> std::fmt::Result {
+    pub fn format(&self, ident_value: usize, fmt: &mut impl std::io::Write) -> std::io::Result<()> {
         let mut data = get_data(&());
         let nodes = self.0.as_slice();
+        let mut special_comment = false;
         let multi_line = nodes
             .iter()
             .map(|&n| data.text(n).next().unwrap())
             .map(|b| unsafe { std::str::from_utf8_unchecked(b) })
+            .inspect(|s| special_comment |= s.starts_with("/*R"))
             .any(|s| s.starts_with("/*") || s.ends_with("*/"));
-        let options = textwrap::Options::new(80 - 4 * ident_value)
-            .initial_indent("//\t")
-            .subsequent_indent("// \t");
+
+        let options = if !multi_line {
+            textwrap::Options::new(80 - 4 * ident_value)
+                .initial_indent("//\t")
+                .subsequent_indent("//\t")
+        } else {
+            textwrap::Options::new(80 - 4 * ident_value)
+        };
+        let comment_text = nodes
+            .iter()
+            .map(|&n| data.text(n).next().unwrap())
+            .map(|b| unsafe { std::str::from_utf8_unchecked(b) })
+            .map(str::trim)
+            .map(|s: &str| s.trim_start_matches(if special_comment { "/*R" } else { "/*" }))
+            .map(|s: &str| s.trim_end_matches(if special_comment { "R*/" } else { "*/" }))
+            .map(|s: &str| s.trim_start_matches("//"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .fold(String::new(), |mut output, s| {
+                output.push('\n');
+                output.push_str(s);
+                output
+            });
+        let cmt_text = &comment_text[(1.min(comment_text.len()))..];
+
+        let (comment_start, comment_end) = match (multi_line, special_comment) {
+            (true, true) => ("/*R\n", "R*/\n"),
+            (true, false) => ("/*\n", "*/\n"),
+            (false, _) => ("", ""),
+        };
+        if !cmt_text.is_empty() {
+            let wraped = textwrap::wrap(cmt_text, options);
+            for _ in 0..ident_value {
+                write!(fmt, "\t")?;
+            }
+            write!(fmt, "{comment_start}")?;
+            for line in wraped {
+                for _ in 0..ident_value {
+                    write!(fmt, "\t")?;
+                }
+                writeln!(fmt, "{}", line)?;
+            }
+            for _ in 0..ident_value {
+                write!(fmt, "\t")?;
+            }
+            write!(fmt, "{comment_end}")?;
+        }
+        Ok(())
+    }
+}
+
+impl<'ts> TopLevelBlock<'ts> {
+    fn format(&self, ident: usize, fmt: &mut impl std::io::Write) -> std::io::Result<()> {
+        match self {
+            TopLevelBlock::Error(node) => {
+                writeln!(fmt, "{}", node.utf8_text(get_data(&())).unwrap())?;
+            }
+            TopLevelBlock::PreprocIf(if_data, tplb) => {
+                write!(fmt, "#",)?;
+                for _ in 0..=ident {
+                    write!(fmt, " ")?;
+                }
+                writeln!(
+                    fmt,
+                    "{} {}",
+                    match if_data.ifnode.map(|n| n.kind()).unwrap_or("") {
+                        "#ifndef" => "ifndef",
+                        "#ifdef" => "ifdef",
+                        "#if" => "if",
+                        _ => "",
+                    },
+                    if_data
+                        .ifnode_identifier
+                        .and_then(|n| n.utf8_text(get_data(&())).ok())
+                        .unwrap_or(""),
+                )?;
+                for tlb in &if_data.tlb {
+                    tlb.format(ident + 1, fmt)?;
+                }
+
+                tplb.format(ident + 1, fmt)?;
+
+                write!(fmt, "#",)?;
+                for _ in 0..=ident {
+                    write!(fmt, " ")?;
+                }
+                writeln!(
+                    fmt,
+                    "endif // {}",
+                    if_data
+                        .ifnode_identifier
+                        .and_then(|n| n.utf8_text(get_data(&())).ok())
+                        .unwrap_or(""),
+                )?;
+                writeln!(fmt)?;
+            }
+            TopLevelBlock::Plain(tp) => {
+                tp.format(0, fmt)?;
+            }
+        }
         Ok(())
     }
 }
@@ -243,6 +436,15 @@ impl<'ts> ToplevelDefinition<'ts> {
         let mut out_vec = Vec::with_capacity(2);
         Self::from_tree_inner(&root_node, &mut out_vec, true);
         out_vec
+    }
+
+    pub fn format(&self, ident: usize, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.declarations.format(ident, output)?;
+        self.functions.format(ident, output)?;
+
+        self.leftovers_comments.format(ident, output)?;
+
+        Ok(())
     }
 }
 
