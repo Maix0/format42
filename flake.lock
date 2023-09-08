@@ -18,6 +18,22 @@
         "type": "github"
       }
     },
+    "header-vim": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1635619065,
+        "narHash": "sha256-e6gCHEd5/+YtEIcsngQjHnICPd2wGp5P+yGIlgRFFws=",
+        "owner": "42Paris",
+        "repo": "42header",
+        "rev": "71e6a4df6d72ae87a080282bf45bb993da6146b2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "42Paris",
+        "repo": "42header",
+        "type": "github"
+      }
+    },
     "naersk": {
       "inputs": {
         "nixpkgs": "nixpkgs"
@@ -85,6 +101,7 @@
     },
     "root": {
       "inputs": {
+        "header-vim": "header-vim",
         "naersk": "naersk",
         "nixpkgs": "nixpkgs_2",
         "rust-overlay": "rust-overlay",

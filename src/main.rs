@@ -1,8 +1,11 @@
 #![allow(dead_code)]
+#![feature(lazy_cell)]
 use std::io::Read;
 use std::{collections::VecDeque, mem::MaybeUninit};
 
 use std::cell::RefCell;
+
+mod header;
 
 thread_local! {
     pub static CURRENT_DATA_BYTES: RefCell<Box<[u8]>> = RefCell::new(Vec::new().into_boxed_slice());
@@ -16,7 +19,11 @@ fn main() {
     if args.is_empty() {
         let mut buffer = Vec::with_capacity(1024);
         std::io::stdin().lock().read_to_end(&mut buffer).unwrap();
-        run(buffer.into_boxed_slice(), Vec::with_capacity(1024));
+        run(
+            "new_file.c",
+            buffer.into_boxed_slice(),
+            Vec::with_capacity(1024),
+        );
         return;
     }
     args.iter()
@@ -46,13 +53,29 @@ fn main() {
             let mut buffer = Vec::with_capacity(o.len());
             f.read_to_end(&mut buffer)?;
             Ok((path, f, buffer, o))
-        }) // .into_par_iter()
-        .map(|res| res.map(|(p, f, i, o)| (p, f, run(i.into_boxed_slice(), o))))
+        })
+        .map(|res| {
+            res.map(|(p, f, i, o)| {
+                (
+                    p,
+                    f,
+                    run(
+                        std::path::PathBuf::from(&p)
+                            .file_name()
+                            .and_then(std::ffi::OsStr::to_str)
+                            .unwrap_or("<new file>"),
+                        i.into_boxed_slice(),
+                        o,
+                    ),
+                )
+            })
+        })
         .for_each(|res| match res {
             Ok((path, _f, o)) => {
-                println!(
-                    "{}: \n{:}",
-                    std::path::PathBuf::from(path).display(),
+                print!(
+                    //"//{}:\n{:}", "{}"
+                    //std::path::PathBuf::from(path).display(),
+                    "{}",
                     std::str::from_utf8(&o).unwrap()
                 );
             }
@@ -62,7 +85,7 @@ fn main() {
         });
 }
 
-fn run(data: Box<[u8]>, mut output: Vec<u8>) -> Vec<u8> {
+fn run(filename: &str, data: Box<[u8]>, mut output: Vec<u8>) -> Vec<u8> {
     let mut ts = tree_sitter::Parser::new();
     ts.set_language(tree_sitter_c::language()).unwrap();
     if std::str::from_utf8(&data).is_err() {
@@ -72,9 +95,23 @@ fn run(data: Box<[u8]>, mut output: Vec<u8>) -> Vec<u8> {
     let tree = ts.parse(get_data(&()), None).unwrap();
     let top_level = ToplevelDefinition::from_tree(&tree);
 
+    if let Some(TopLevelBlock::Plain(ToplevelDefinition { header, .. })) = top_level.last() {
+        header::insert_header(
+            filename,
+            &mut output,
+            (header.0.len() == 11).then(|| {
+                let h: [String; 11] = std::array::from_fn(|i| {
+                    header.0[i].utf8_text(get_data(&())).unwrap().to_string()
+                });
+                h
+            }),
+        )
+        .unwrap();
+    }
+
     top_level
         .iter()
-        .map(|t| t.format(0, &mut output))
+        .map(|t| t.format(filename, 0, &mut output))
         .for_each(|r| r.unwrap());
     output
 }
@@ -200,7 +237,7 @@ impl<'ts> DeclarationBlock<'ts> {
                 for _ in 0..ident {
                     write!(fmt, "\t")?;
                 }
-                writeln!(fmt, "{ty} {};", def.utf8_text(get_data(&())).unwrap())?;
+                writeln!(fmt, "{ty}{};", def.utf8_text(get_data(&())).unwrap())?;
             }
         }
         Ok(())
@@ -270,14 +307,19 @@ impl<'ts> CommentBlock<'ts> {
 }
 
 impl<'ts> TopLevelBlock<'ts> {
-    fn format(&self, ident: usize, fmt: &mut impl std::io::Write) -> std::io::Result<()> {
+    fn format(
+        &self,
+        filename: &str,
+        ident: usize,
+        fmt: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
         match self {
             TopLevelBlock::Error(node) => {
                 writeln!(fmt, "{}", node.utf8_text(get_data(&())).unwrap())?;
             }
             TopLevelBlock::PreprocIf(if_data, tplb) => {
                 write!(fmt, "#",)?;
-                for _ in 0..=ident {
+                for _ in 0..ident {
                     write!(fmt, " ")?;
                 }
                 writeln!(
@@ -295,13 +337,13 @@ impl<'ts> TopLevelBlock<'ts> {
                         .unwrap_or(""),
                 )?;
                 for tlb in &if_data.tlb {
-                    tlb.format(ident + 1, fmt)?;
+                    tlb.format(filename, ident + 1, fmt)?;
                 }
 
-                tplb.format(ident + 1, fmt)?;
+                tplb.format(filename, ident + 1, fmt)?;
 
                 write!(fmt, "#",)?;
-                for _ in 0..=ident {
+                for _ in 0..ident {
                     write!(fmt, " ")?;
                 }
                 writeln!(
@@ -315,7 +357,7 @@ impl<'ts> TopLevelBlock<'ts> {
                 writeln!(fmt)?;
             }
             TopLevelBlock::Plain(tp) => {
-                tp.format(0, fmt)?;
+                tp.format(filename, ident, fmt)?;
             }
         }
         Ok(())
@@ -438,10 +480,14 @@ impl<'ts> ToplevelDefinition<'ts> {
         out_vec
     }
 
-    pub fn format(&self, ident: usize, output: &mut impl std::io::Write) -> std::io::Result<()> {
+    pub fn format(
+        &self,
+        filename: &str,
+        ident: usize,
+        output: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
         self.declarations.format(ident, output)?;
         self.functions.format(ident, output)?;
-
         self.leftovers_comments.format(ident, output)?;
 
         Ok(())

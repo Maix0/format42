@@ -6,7 +6,7 @@
 /*   By: maix <marvin@42.fr>                        +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2023/08/28 13:53:54 by maix              #+#    #+#             */
-/*   Updated: 2023/09/07 23:48:57 by maix             ###   ########.fr       */
+/*   Updated: 2023/09/08 09:48:53 by maix             ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -26,8 +26,8 @@
 #include "locale.h"
 #include <stdio.h>
 
-void exit(int);
-struct void_ exit2(int);
+void exit(int code);
+struct void_ exit2(int code);
 
 // outer comment
 // This is also a two line comment !
